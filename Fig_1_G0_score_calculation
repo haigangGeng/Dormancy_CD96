@@ -1,0 +1,275 @@
+##################################################infervna
+
+
+library(iCNA)
+useGenome('hg38')
+
+# 生成reference ==============================
+unique(datafilt$celltype)
+normal <- datafilt[,datafilt$celltype == "others"]
+
+# 随机抽取部分细胞作为reference
+
+if (ncol(normal) > 1000) {
+  ref <- normal[,sample(colnames(normal), 1000)]
+} else {ref <- normal}
+
+ref$celltype <- "normal"
+
+# 得到reference cell的名字
+
+refname <- list(ref = colnames(ref))
+
+# 生成inferCNA输入文件 ==============================
+
+input <- datafilt[,datafilt$celltype == "Epithelial"]
+input$celltype <- "candidate"
+
+# 合并reference和candidate
+
+input <- merge(ref, input)
+
+# 生成注释文件
+
+info <- data.frame(id = colnames(input), type = input$celltype)
+info_p <- data.frame(id = colnames(input), sample = input$sample)
+
+# 生成输入矩阵 (需要是log转换后标准化数据)
+
+input <- as.matrix(GetAssayData(input, slot = "counts", assay = "RNA"))
+input <- t(t(input)/colSums(input) * 1000000)
+input <- log2(input/10 + 1)
+
+# 开始inferCNA计算 ==============================
+dim(input)
+# 参数n和noise对结果影响都很大 (具体选择方法看OneNote中案例)
+
+cna <- iCNA::infercna(m = input, refCells = refname, window = 150,
+                      n = 5000, noise = 0.1, isLog = TRUE, verbose = FALSE)
+
+
+# 计算cnaSignal ----------
+
+signal <- data.frame(signal = cnaSignal(cna, refCells = refname))
+
+# 计算cnaCor ----------
+
+cor <- do.call(rbind, lapply(unique(info_p$sample), function(i){
+  
+  name <- info_p$id[info_p$sample == i]
+  common <- setdiff(name, unlist(refname))
+  
+  subdata <- cna[,name]
+  correlation <- cnaCor(subdata, threshold = NULL, bySample = F,
+                        samples = NULL, excludeFromAvg = common)
+  
+  data.frame(cor = correlation)
+}))
+
+
+# 总结结果 ----------
+
+signal <- rownames_to_column(signal, var = "id")
+cor <- rownames_to_column(cor, var = "id")
+
+allscore <- merge(signal, cor, by = "id")
+allscore <- merge(allscore, info, by = "id")
+
+# 保存结果 ==============================
+
+save(cna, refname, allscore, file = "data/inferCNA_results.Rdata")
+
+
+# 密度散点图可视化 ==============================
+
+get_density <- function(x, y, ...) {
+  dens <- MASS::kde2d(x, y, ...)
+  ix <- findInterval(x, dens$x)
+  iy <- findInterval(y, dens$y)
+  ii <- cbind(ix, iy)
+  return(dens$z[ii])
+}
+
+# 计算每个点密度
+
+allscore <- do.call(rbind, lapply(unique(allscore$type), function(i){
+  subdata <- allscore[allscore$type == i,]
+  subdata$dens <- get_density(subdata$signal, subdata$cor, n = 1000)
+  subdata$dens <- subdata$dens / max(subdata$dens)
+  subdata
+}))
+
+# 设定阈值
+thres_sig <- 0.005
+thres_cor <- 0.4
+
+# 开始画图
+col_rb <- c("#343391","#0064af","#0090cc",
+            "#00b6db","#01b7c2","#53c0a3",
+            "#8dcb8a","#bbd967","#fbd324",
+            "#f6bd25","#f4a02e","#ed6f32",
+            "#ea5c2e","#d5452f","#c02e2f","#8b2a21")
+
+
+plot <- ggplot(allscore, aes(signal, cor)) +
+  geom_point(aes(color = dens), size = 1) + 
+  scale_color_gradientn(colors = col_rb) + 
+  
+  geom_vline(xintercept = thres_sig, color = "grey20", linetype = "longdash") + 
+  geom_hline(yintercept = thres_cor, color = "grey20", linetype = "longdash") + 
+  xlim(0, quantile(allscore$signal, probs=c(0.999))) + 
+  
+  theme_bw() + theme(panel.grid = element_blank()) + 
+  facet_wrap(~type, nrow = 1)
+
+ggsave("inferCNV/0.0045_0.7.png", plot, dpi = 200,
+       width = 11, height = 5, limitsize = FALSE)
+
+
+
+##############################按每个人划分
+
+library(clusterProfiler)
+library(AUCell)
+
+cells_rankings <- AUCell_buildRankings(data@assays$RNA@counts,nCores = 3,plotStats=FALSE)
+
+
+sig <- "/home/ug1268/program/sc_CD96/scRNA/GES234581/signature/G0_signature.txt"
+signature <- read.table(sig ,sep="\t",header=F,check.names=F,row.names = 1)
+signature <- lapply(rownames(signature), function(i){
+  subdata <- t(signature[i,])[,1]
+  subdata <- data.frame(term=i, gene=subdata)
+})
+
+signature <- do.call(rbind, signature)
+signature <- na.omit(signature)
+
+# 列表转换
+signature <- split(signature$gene, signature$term)
+cells_AUC <- AUCell_calcAUC(signature, cells_rankings, aucMaxRank=nrow(cells_rankings)*0.05) 
+aucs <- lapply(names(signature), function(i){
+  subdata <- as.numeric(getAUC(cells_AUC)[i,])
+  subdata <- data.frame(row.names = rownames(data@meta.data),term=subdata)
+})
+aucs <- do.call(cbind, aucs)
+colnames(aucs)<-names(signature)
+data<-AddMetaData(data,aucs)
+
+data$sig_G0_score <- data$G0_up - data$G0_down
+
+thres_sig <- 0.005
+thres_cor <- 0.4
+
+datafilt <- data[,which(data$infercna_signal > thres_sig & data$infercna_cor > thres_cor)]
+meta_need <- datafilt@meta.data
+meta_need <- meta_need[which(meta_need$Response %in% c("CR","PR")),]
+
+result_3 <- NULL
+for (n in unique(meta_need$Patient)) {
+  input <- meta_need[which(meta_need$Patient == n),]
+  
+  if (length(unique(input$sample_time)) == 2) {
+    for (m in unique(input$sample_time)) {
+      
+      input_1 <- input[which(input$sample_time == m),]
+      
+      sum <- data.frame(id = n,
+                        sample_time = m,
+                        value = mean(input_1[,signature_need])
+      )
+      
+      result_3 <- rbind(result_3,sum)
+    } 
+  }
+}
+
+pair_result = t_test(result_3,value~sample_time)
+pair_result
+table(meta_need$sample_time,meta_need$Patient)
+table(meta_need$Response,meta_need$Patient)
+
+
+meta_need$treatment_response <- ifelse(meta_need$Response == "SD","non_pCR","pCR")
+#########################作图
+theme_boxplot <- theme(panel.background=element_rect(fill="white",colour="black",size=0.25),
+                       axis.line=element_line(colour="black",size=0.25),
+                       axis.title=element_text(size=13,face="plain",color="black"),
+                       axis.text = element_text(size=12,face="plain",color="black"),
+                       legend.position="none")
+
+
+# 绘制散点图+配对连线
+pdf("/home/ug1268/program/sc_CD96/scRNA/GSE236581/new_ope/配对_all_p0.0221.pdf",onefile = FALSE,width=4,height=4)
+
+p1 <- ggplot(result_3,aes(sample_time, value, fill = sample_time))+
+  geom_line(aes(group = id),
+            size = 0.5)+#图层在下，就不会显示到圆心的连线
+  geom_point(shape = 21,
+             size = 5,
+             stroke = 0.6,
+             color = 'black')+
+  ylim(0,0.02)+
+  #scale_x_discrete(expand = c(-1.05, 0)) + # 坐标轴起始
+  scale_fill_manual(values = c('#800040','#fc6666'))+
+  #geom_rangeframe() + # 坐标轴分离
+  theme_classic() +
+  theme_boxplot  +
+  labs(x = ' ', 
+       y = 'Values')
+
+p1
+dev.off()
+
+write.table(result_3, "plot_statasis/result_all.txt", sep="\t", quote=F, row.names=T)
+
+##################################cell cycle
+sig <- "/home/ug1268/program/sc_CD96/scRNA/GES178341/signature/cell_cycle_signature_1.txt"
+signature <- read.table(sig ,sep="\t",header=T,check.names=F)
+s.genes <- signature$G1_S
+g2m.genes <- signature$G2_M
+
+srat <- CellCycleScoring(datafilt, s.features = s.genes, g2m.features = g2m.genes)
+
+meta <- srat@meta.data
+
+meta <- meta[which(meta$Treatment.response == "pCR"),]
+meta$S.Score <- scale(meta$S.Score)
+meta$G2M.Score <- scale(meta$G2M.Score)
+
+meta$NG_type <- ifelse(meta$S.Score < c(-0.25) & meta$G2M.Score < c(0),"G0",
+                       ifelse(meta$S.Score > c(-0.25) & meta$G2M.Score < c(0),"G1",
+                              ifelse(meta$S.Score > c(0.25) & meta$G2M.Score > c(0),"S",
+                                     ifelse(meta$S.Score < c(0.25) & meta$G2M.Score > c(0),"G2M","none")))
+)
+
+
+table(meta$NG_type,meta$sample_time)
+table(meta$NG_type,meta$sample_time)
+Cellratio <- prop.table(table(meta$NG_type,meta$sample_time), margin = 2)#计算各组样本不同细胞群比例
+Cellratio
+
+Cellratio <- as.data.frame(Cellratio)
+colnames(Cellratio)[1] <- "type"
+colnames(Cellratio)[2] <- "sample_time"
+colnames(Cellratio)[3] <- "ratio"
+pdf("所有样本_NG算法.pdf",onefile = FALSE,width=5,height=4)
+
+ggplot(data = Cellratio, aes(x=sample_time, y = ratio, fill = type)) +
+  scale_fill_manual(
+    values = c("G0" = "#bd2628",
+               "G1" = "#caeaf0",
+               "S" = "#81C3EA",
+               "G2M" = "#F48862"))+
+  
+  geom_bar(stat="identity", color = "black", size = 0.55, width = 0.7,
+           position = "fill")+
+  geom_text(aes(label=ratio),
+            position=position_fill(vjust=0.5))
+
+dev.off()
+
+
+
+
+
