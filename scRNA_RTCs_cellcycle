@@ -1,0 +1,153 @@
+library(data.table)
+library(Seurat)
+library(plyr)
+library(RColorBrewer)
+library(scater)
+library(SingleCellExperiment)
+library(tidyverse)
+library(future)
+library(SingleR)
+library(cowplot)
+library(ggpubr)
+library(reshape2)
+library(tibble)
+library(ggalluvial)
+library(Vennerable)
+library(harmony)
+library(circlize)
+
+mycol <- c(brewer.pal(5,"Set1"), brewer.pal(8,"Set2"),
+           brewer.pal(11,"Set3"), brewer.pal(12,"Paired"),
+           brewer.pal(8,"Accent"), brewer.pal(11,"Spectral"),
+           brewer.pal(11,"BrBG"), brewer.pal(11,"PiYG"),
+           brewer.pal(11,"PuOr"),brewer.pal(11,"RdBu"))
+
+col <- c(colorRampPalette(c(magma(323, begin = 0.15)[1]))(10),
+         magma(323, begin = 0.18))
+
+col2 <- colorRampPalette(c("#0070b2","#5ec7dd",
+                           "#f3f3f1","#f79676","#da1735"))(50)
+
+col3 <- colorRamp2(c(-2,-1,0,1,2),
+                   c("#0070b2","#5ec7dd","#f3f3f1","#f79676","#da1735"))
+
+
+source("/home/ug1268/tools/mouse_sc/public_function_mouse.R")
+source("/home/ug1268/tools/mouse_sc/citeseq_function.R")
+
+active <- Read10X("/home/ug1268/program/dormancy/animal_scRNA_seq/tumor_cell/CT26_active_cell/CT26_active_cell--nosecondary/outs/filtered_feature_bc_matrix")
+dormancy <- Read10X("/home/ug1268/program/dormancy/animal_scRNA_seq/tumor_cell/CT26_dormancy_cell/CT26_dormancy_cell--nosecondary/outs/filtered_feature_bc_matrix")
+
+active <- CreateSeuratObject(active)
+dormancy <- CreateSeuratObject(dormancy)
+
+active$group <- "CT26_active"
+dormancy$group <- "CT26_dormancy"
+
+data <- merge(active,dormancy)
+data <- SetIdent(data, value = "group")
+
+setwd("/home/ug1268/program/dormancy/animal_scRNA_seq/operate/CT26_tumor_cell/")
+# 数据质控
+
+name = "figure/01_basic/QC_plot.pdf"
+pdf(file = name, width = 10, height = 7)
+qc_plot(data = data, species = "mouse")
+dev.off()
+
+datafilt <- qc_filter(data = data,
+                      nFeature_dn = 500,
+                      nFeature_up = 7000,
+                      nCount_dn = 2000,
+                      nCount_up = 40000,
+                      mito_up = 15,
+                      ribo_dn = 1,
+                      ribo_up = 50,
+                      gene_filter = 3,
+                      species = "mouse")
+
+# 只纳入蛋白编码基因
+
+Mouse_mrna <- read.table("/home/ug1268/tools/mouse_sc/Mouse_mRNA.txt",sep="\t",header=T,check.names=F,row.names = 1)
+common <- intersect(rownames(datafilt), rownames(Mouse_mrna))
+datafilt <- datafilt[common,]
+
+
+# 保存结果
+
+saveRDS(datafilt, "data/datafilt_raw.rds")
+
+
+# 测序深度标准化 ------------------------------
+
+datafilt <- NormalizeData(datafilt, scale.factor = 10000,
+                          normalization.method = "LogNormalize")
+
+
+# 寻找变异度高的基因 ------------------------------
+
+datafilt <- FindVariableFeatures(datafilt, nfeatures = 2000, 
+                                 selection.method = "vst")
+
+
+# scale标准化 ------------------------------
+
+datafilt <- ScaleData(datafilt, features = VariableFeatures(datafilt),
+                      vars.to.regress = c("S.Score", "G2M.Score", "percent_mito","percent_ribo"))
+
+
+# 数据降维 ------------------------------
+
+datafilt <- RunPCA(datafilt, features = VariableFeatures(datafilt),
+                   assay = 'RNA', slot = 'scale.data')
+
+datafilt <- RunUMAP(datafilt, dims = 1:15, 
+                    n.neighbors = 200, min.dist = 1,
+                    reduction = "pca", reduction.name = "umap")
+
+
+sig <- "NG_signature.txt"
+signature <- read.table(sig ,sep="\t",header=T,check.names=F)
+
+s.genes <- signature$G1_S
+g2m.genes <- signature$G2_M
+
+srat <- CellCycleScoring(datafilt, s.features = s.genes, g2m.features = g2m.genes)
+
+
+meta <- srat@meta.data
+meta$S.Score <- scale(meta$S.Score)
+meta$G2M.Score <- scale(meta$G2M.Score)
+
+meta$NG_type <- ifelse(meta$S.Score < c(-0.25) & meta$G2M.Score < c(0),"G0",
+                       ifelse(meta$S.Score > c(-0.25) & meta$G2M.Score < c(0),"G1",
+                              ifelse(meta$S.Score > c(0.25) & meta$G2M.Score > c(0),"S",
+                                     ifelse(meta$S.Score < c(0.25) & meta$G2M.Score > c(0),"G2M","none")))
+)
+
+
+Cellratio <- prop.table(table(meta$NG_type,meta$group), margin = 2)#计算各组样本不同细胞群比例
+Cellratio
+
+table(meta$group,meta$NG_type)
+
+Cellratio <- as.data.frame(Cellratio)
+colnames(Cellratio)[1] <- "type"
+colnames(Cellratio)[2] <- "sample_time"
+colnames(Cellratio)[3] <- "ratio"
+pdf("MC38.pdf",onefile = FALSE,width=5,height=4)
+
+ggplot(data = Cellratio, aes(x=sample_time, y = ratio, fill = type)) +
+  scale_fill_manual(
+    values = c("G0" = "#bd2628",
+               "G1" = "#caeaf0",
+               "S" = "#81C3EA",
+               "G2M" = "#F48862"))+
+  
+  geom_bar(stat="identity", color = "black", size = 0.55, width = 0.7,
+           position = "fill")+
+  geom_text(aes(label=ratio),
+            position=position_fill(vjust=0.5))
+
+dev.off()
+
