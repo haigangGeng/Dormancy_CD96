@@ -1,0 +1,464 @@
+library(Seurat)
+library(plyr)
+library(scater)
+library(stringr)
+library(future)
+library(ggplot2)
+library(cowplot)
+library(reshape2)
+library(ggplot2)
+library(data.table)
+library(tidyverse)
+library(future.apply)
+library(RColorBrewer)
+library(SingleCellExperiment)
+
+mycol <- c(brewer.pal(5,"Set1"), brewer.pal(8,"Set2"),
+           brewer.pal(11,"Set3"), brewer.pal(12,"Paired"),
+           brewer.pal(8,"Accent"), brewer.pal(11,"Spectral"),
+           brewer.pal(11,"BrBG"), brewer.pal(11,"PiYG"),
+           brewer.pal(11,"PuOr"),brewer.pal(11,"RdBu"))
+
+col <- c(colorRampPalette(c(magma(323, begin = 0.15)[1]))(10),
+         magma(323, begin = 0.18))
+
+col2 <- colorRampPalette(c("#0070b2","#5ec7dd",
+                           "#f3f3f1","#f79676","#da1735"))(50)
+
+col3 <- colorRamp2(c(-2,-1,0,1,2),
+                   c("#0070b2","#5ec7dd","#f3f3f1","#f79676","#da1735"))
+
+
+
+# 基本分析 =====================================================================
+
+# 读入函数
+
+setwd("/home/ug1268/program/sc_CD96/sRNA_mouse/test1")
+source("/home/ug1268/tools/mouse_sc/public_function_mouse.R")
+source("/home/ug1268/tools/mouse_sc/citeseq_function.R")
+
+# 读入数据
+
+path = "/home/ug1268/program/sc_CD96/sRNA_mouse/data"
+data <- read10x_all(path = path, merge = T)
+
+
+# 样本分组
+
+data$group <- data$sample
+table(data$group)
+
+
+datafilt <- qc_filter(data = data,
+                      nFeature_dn = 300,
+                      nFeature_up = 7000,
+                      nCount_dn = 1000,
+                      nCount_up = 40000,
+                      mito_up = 15,
+                      ribo_dn = 1,
+                      ribo_up = 50,
+                      gene_filter = 2,
+                      species = "mouse")
+
+
+table(datafilt$group)
+
+
+# 只纳入蛋白编码基因
+
+Mouse_mrna <- read.table("/home/ug1268/tools/mouse_sc/Mouse_mRNA.txt",sep="\t",header=T,check.names=F,row.names = 1)
+
+
+common <- intersect(rownames(datafilt), rownames(Mouse_mrna))
+datafilt <- datafilt[common,]
+
+# 保存结果
+
+saveRDS(datafilt, "data/datafilt_raw.rds")
+
+
+# 去除doublets =================================================================
+
+datafilt_sub <- SplitObject(datafilt, split.by = "sample")
+
+
+# 分别进行重新标准化
+
+datafilt_sub <- lapply(datafilt_sub, function(data){
+  normdata <- NormalizeData(data) %>%
+    FindVariableFeatures() %>% ScaleData()
+  normdata <- RunPCA(normdata)
+  return(normdata)
+})
+
+
+# 分别运行DoubletFinder
+
+library(DoubletFinder)
+library(future.apply)
+
+plan(multisession, workers = 20)
+options(future.globals.maxSize = 3000*1024^2)
+
+# 并行运算
+
+doubleInfo <- future_lapply(datafilt_sub, function(data) {
+  
+  # 寻找最优pK值
+  
+  sweep.res.list <- paramSweep_v3(data, PCs = 1:20)
+  sweep.stats <- summarizeSweep(sweep.res.list, GT = FALSE)  
+  bcmvn <- find.pK(sweep.stats)
+  
+  pK_bcmvn <- bcmvn$pK[which.max(bcmvn$BCmetric)] %>%
+    as.character() %>% as.numeric()
+  
+  # 排除不能检出的同源doublets，优化期望的doublets数量
+  
+  DoubletRate = ncol(data)*8*1e-6
+  homotypic.prop <- modelHomotypic(data$seurat_clusters)
+  
+  nExp_poi <- round(DoubletRate*ncol(data)) 
+  nExp_poi.adj <- round(nExp_poi*(1-homotypic.prop))
+  
+  # 使用确定好的参数鉴定doublets
+  
+  data <- doubletFinder_v3(data, PCs = 1:20, pN = 0.25,
+                           pK = pK_bcmvn, reuse.pANN = F,
+                           nExp = nExp_poi.adj)
+  
+  names(data@meta.data) <- gsub("DF.classifications.*",
+                                "DF.classifications",
+                                colnames(data@meta.data))
+  
+  infodata <- data.frame(id = rownames(data@meta.data),
+                         DFclass = data@meta.data[["DF.classifications"]])
+  return(infodata)
+}, future.seed = TRUE)
+
+plan(sequential)
+
+doubleInfo <- do.call(rbind,doubleInfo) %>%data.frame()
+rownames(doubleInfo) <- NULL
+
+# 将结果整合到seurat对象
+library(tibble)
+doubleInfo <- column_to_rownames(doubleInfo, var = "id")
+datafilt <- AddMetaData(datafilt, doubleInfo)
+
+
+# 结果初步评估
+
+table(doubleInfo$DFclass)
+
+# 结果可视化
+
+plot <- DimPlot(datafilt, pt.size = 0.2, 
+                label=T, repel=T, raster = FALSE, 
+                order = list("Doublet", "Singlet"),
+                cols = c("#f3f3f1", "#0070b2"), 
+                label.size = 3, reduction = "umap", group.by = "DFclass")
+
+ggsave("result/doublets.png", plot, dpi = 300, width = 6, height = 5)
+
+
+# 排除doublets
+
+datafilt <- datafilt[,datafilt$DFclass == "Singlet"]
+
+
+dimplot_new(datafilt_new,
+            reduction = "umap",
+            pt.size = 0.2, label = T,
+            group.by = c("seurat_clusters"))
+
+name = "figure/01_basic/marker_dotplot_5.pdf"
+dotplot_marker(datafilt_new,
+               group.by = "seurat_clusters",
+               species = "mouse",
+               output = name,
+               height = 10)
+
+# 细胞注释 =====================================================================
+# 降维聚类
+
+datafilt_new <- autocluster(datafilt_need, nfeatures = 2000,
+                            ndim = 37, neigh = 20,
+                            dist = 1, res = 1)
+
+
+table(datafilt_new$seurat_clusters,datafilt_new$sample)
+datafilt_new$celltype_new <- "others"
+datafilt_new$celltype_new[which(datafilt_new$seurat_clusters %in% c("0","7","9","12")) ] <- "CD8T"
+
+Cellratio <- prop.table(table(datafilt_new$celltype_new, datafilt_new$sample), margin = 2)#计算各组样本不同细胞群比例
+Cellratio
+
+table(datafilt_new$seurat_clusters,datafilt_new$sample)
+
+datafilt_new$celltype_new <- "others"
+datafilt_new$celltype_new[which(datafilt_new$seurat_clusters %in% c("0","7","9","12")) ] <- "CD8T"
+datafilt_new$celltype_new[which(datafilt_new$seurat_clusters %in% c("6","13")) ] <- "CD4T"
+datafilt_new$celltype_new[which(datafilt_new$seurat_clusters %in% c("8","20","21")) ] <- "Treg"
+datafilt_new$celltype_new[which(datafilt_new$seurat_clusters %in% c("15","17","19")) ] <- "DC"
+datafilt_new$celltype_new[which(datafilt_new$seurat_clusters %in% c("1","3","11")) ] <- "Macrophage"
+datafilt_new$celltype_new[which(datafilt_new$seurat_clusters %in% c("2","10","14")) ] <- "NK"
+datafilt_new$celltype_new[which(datafilt_new$seurat_clusters %in% c("22")) ] <- "Mast"
+datafilt_new$celltype_new[which(datafilt_new$seurat_clusters %in% c("4","16","18")) ] <- "B"
+datafilt_new$celltype_new[which(datafilt_new$seurat_clusters %in% c("5","23")) ] <- "Mono"
+#datafilt$celltype[which(datafilt$seurat_clusters %in% c("16")) ] <- "Mast"
+
+
+
+
+dimplot_new(datafilt_new,
+            reduction = "umap",
+            pt.size = 0.2, label = T,
+            group.by = c("celltype_new"))
+
+
+
+CD8T <- SetIdent(CD8T, value = "group")
+library(COSG)
+marker_cosg <- cosg(
+  CD8T,
+  groups='all',
+  assay='RNA',
+  slot='data',
+  mu=1,
+  n_genes_user=500)
+
+Cellratio <- prop.table(table(datafilt_new$celltype_new, datafilt_new$sample), margin = 2)#计算各组样本不同细胞群比例
+Cellratio
+
+
+####################umap图
+pdf("result/umap_all.pdf",onefile = FALSE,width=6,height=4)
+
+dimplot_new(datafilt_new,
+            reduction = "umap",
+            pt.size = 0.2, label = T,
+            group.by = c("celltype_new"))
+dev.off()
+
+#############################
+
+name = "result/marker_dotplot_4.pdf"
+dotplot_marker(datafilt_new,
+               group.by = "celltype_new",
+               species = "mouse",
+               output = name,
+               height = 5,
+               width = 10)
+
+
+
+
+######################密度图
+pdf("result/density.pdf",onefile = FALSE,width=7.7,height=4)
+prop_density(datafilt,
+             group = "sample",
+             coord = "umap")
+dev.off()
+
+############################细胞比例图
+
+Cellratio <- prop.table(table(datafilt_new$celltype_new, datafilt_new$sample), margin = 2)#计算各组样本不同细胞群比例
+Cellratio
+
+pdf("result/cell_proportion.pdf",onefile = FALSE,width=6.5,height=4)
+
+prop_back2back(datafilt_new,
+               group = "sample",
+               cluster = "celltype_new",
+               order = FALSE)
+dev.off()
+
+
+##################################CD96表达图
+
+
+CD8T <- datafilt_new[,which(datafilt_new$celltype_new %in% c("CD8T"))]
+
+gene = c("Cd96")
+gene = c("Ifng")
+gene = c("Gzmb")
+name = paste0("result/Distri_exp_", gene, ".pdf")
+pdf(name,onefile = FALSE,width=5.5,height=4)
+
+exp_distribution_ecdf(CD8T,
+                      select = gene,
+                      group = "group",
+                      method = "wilcox.test",
+                      ncol = 1)
+dev.off()
+
+
+##############火山图
+table(CD8T$sample)
+DEGs_CD8T <- FindMarkers(CD8T,  ident.1 = "t1",group.by = 'sample',ident.2 = "t2",
+                         assay = "RNA", slot = 'data', logfc.threshold = 0,
+                         min.pct = 0.0001,only.pos =F)
+
+DEGs_CD8T$id <- rownames(DEGs_CD8T)
+
+saveRDS(datafilt_new, "data/datafilt.rds")
+
+input_CD8T <- DEGs_CD8T
+
+
+input_CD8T$p_val <- -log(input_CD8T$p_val,10)
+
+
+x <- data.frame(gene = rownames(input_CD8T),
+                P.Value = input_CD8T$p_val,
+                logFC = input_CD8T$avg_log2FC)
+
+x <- x[-which(x$logFC < -2),]
+
+x$P.Value[which(x$P.Value > 100)] <- 100
+
+
+max(x$P.Value)
+max(x$logFC)
+min(x$logFC)
+
+plot_mode <- "advanced" #酷炫版
+
+logFCcut <- 0.1#log2-foldchange
+pvalCut <- -log(0.05,10) #P.value
+adjPcut <- -log(0.05,10) #adj.P.value
+
+xmin <- -2
+xmax <- 2
+ymin <- 0
+ymax <- 100
+
+
+x$color_transparent <- ifelse((x$P.Value > pvalCut & x$logFC > logFCcut), "#f15e4c", ifelse((x$P.Value > pvalCut & x$logFC < -logFCcut), "#009bc7","grey30"))
+table(x$color_transparent)
+# 簡單的setting for size
+x$size <- ifelse((x$P.Value > pvalCut & abs(x$logFC) > logFCcut), 3, 2)
+
+x$logFC[which(x$gene == "Havcr2")] <- x$logFC[which(x$gene == "Havcr2")]+0.01
+
+mycol <- "black"
+
+###"Tnfrsf18","Ctla4",""
+
+selectgenes <- x[which(x$gene %in% c("Cd96","Pdcd1","Tigit","Tox",
+                                     "Havcr2","Cd38","Nr4a2","Nr4a3", 
+                                     "Gzmb","Ifng","Gzma","Cd69","Il7r","Itgae","Ltb")),]
+selectgenes$label <- selectgenes$gene
+
+################
+################
+library(ggplot2)
+library(ggrepel)
+library(ggthemes)
+
+pdf("result/火山图.pdf",onefile = FALSE,width=5,height=4)
+p1 <- ggplot(data=x, aes(logFC, P.Value)) +
+  geom_point(alpha = 0.6, size = x$size, colour = x$color_transparent) +
+  
+  labs(x=bquote(~Log[2]~"(fold change)"), y=bquote(~-Log[10]~italic("P-value")), title="") + 
+  ylim(c(ymin,ymax)) + 
+  scale_x_continuous(
+    breaks = c( -2,-1, 0,1, 2), #刻度线的位置
+    labels = c(  -2,-1, 0,1, 2),
+    limits = c(-2, 2) #x轴范围，两侧对称才好看
+  ) +
+  #或用下面这行：
+  #xlim(c(xmin, xmax)) + 
+  
+  #画阈值分界线
+  geom_vline(xintercept = c(-logFCcut, logFCcut), color="grey40", 
+             linetype="longdash", lwd = 0.5) + #虚线的形状和粗细
+  geom_hline(yintercept = pvalCut, color="grey40", 
+             linetype="longdash", lwd = 0.5) +
+  
+  theme_bw(base_size = 12#, base_family = "Times" #修改字体
+  ) +
+  theme(panel.grid=element_blank())
+
+p2 <- p1 + geom_point(data = selectgenes, alpha = 1, size = 3.4, shape = 1, 
+                      stroke = 1, #圈粗细
+                      color = "black") +
+  # 显示感兴趣的基因的基因名
+  scale_color_manual(values = mycol)+
+  geom_text_repel(data = selectgenes,aes(logFC, P.Value, 
+                                         label = label), 
+                  max.overlaps = 20,
+                  show.legend = FALSE, #不显示图例
+                  size = 3, box.padding = unit(0.35, "lines"), 
+                  point.padding = unit(0.3, "lines")) +
+  guides(color=guide_legend(title = NULL)) 
+
+p2
+
+
+
+dev.off()
+
+
+
+################################################GSEA
+
+deg <- DEGs_CD8T
+deg <- deg[which(deg$avg_log2FC <10000 &deg$avg_log2FC > -10000),]
+
+
+
+geneList= deg$avg_log2FC 
+names(geneList)= rownames(deg)
+geneList=sort(geneList,decreasing = T)
+head(geneList)
+
+library(ggplot2)
+library(clusterProfiler)
+library(org.Hs.eg.db)
+
+#选择gmt文件（MigDB中的全部基因集）
+
+gmtfile ='/home/ug1268/program/sc_CD96/sRNA_mouse/test1/signature/T_exhaustion_PMID29768164.gmt'
+
+#GSEA分析
+library(GSEABase) # BiocManager::install('GSEABase')
+geneset <- read.gmt( gmtfile )  
+length(unique(geneset$term))
+
+egmt <- GSEA(geneList, TERM2GENE=geneset, 
+             minGSSize = 5,
+             pvalueCutoff = 1)
+
+GSEA_result <- as.data.frame(egmt)
+
+#############画图
+library(enrichplot)
+pdf("/home/ug1268/program/sc_CD96/sRNA_mouse/test1/result/T_exhaustion_PMID29768164.pdf",onefile = FALSE,width=6,height=6)
+gseaplot2(egmt,"T_exhaustion_PMID29768164",color="red",pvalue_table = T,title="",base_size=10,ES_geom="line")
+dev.off()
+
+gseaplot2(egmt,"T_exhaustion_PMID29768164",color="red",pvalue_table = T,title="",base_size=10,ES_geom="line")
+
+#########################NK
+
+NK <- datafilt[,which(datafilt$celltype %in% c("NK"))]
+
+gene = c("Cd96")
+name = paste0("NK/Distri_exp_", gene, ".pdf")
+pdf(name,onefile = FALSE,width=5.5,height=4)
+
+exp_distribution_ecdf(NK,
+                      select = gene,
+                      group = "group",
+                      method = "wilcox.test",
+                      ncol = 1)
+dev.off()
+
+table(datafilt$celltype_new,datafilt$group)
+
+
+
+
