@@ -1,0 +1,120 @@
+
+# 读入函数
+
+setwd("/home/ug1268/program/sc_CD96/sRNA_mouse/test1/CD8/")
+source("/home/ug1268/tools/mouse_sc/public_function_mouse.R")
+source("/home/ug1268/tools/mouse_sc/citeseq_function.R")
+
+datafilt <- readRDS("~/program/sc_CD96/sRNA_mouse/test1/data/datafilt.rds")
+table(datafilt$celltype_new)
+CD8T <- datafilt[,which(datafilt$celltype_new %in% c("CD8T"))]
+
+CD8T <- autocluster(CD8T, nfeatures = 2000,
+                    ndim = 10, neigh = 20,
+                    dist = 1, res = 1)
+
+dimplot_new(CD8T,
+            reduction = "umap",
+            pt.size = 0.2, label = T,
+            group.by = c("seurat_clusters"))
+
+
+
+select <- c("Sell", "Ccr7","Lef1", ###Naive
+            "Il2rb","Il7r","Eomes", #Memory
+            "Tcf7", "Slamf6","Cxcr3", "Cxcr5", "Xcl1", "Cd44",   #Progenitor
+            "Pdcd1","Havcr2","Cd38","Cd101","Tigit","Lag3","Entpd1","Cd244a","Ctla4",#Exhaustion
+            "Tnf","Ifng","Gzma","Gzmb","Prf1","Gzmk",#Effector
+            "Mki67","Cd28",#prolifrating
+            "Cd69","Itgae","Itga1","Zfp683","Cxcr6"#Trm
+)
+
+
+
+DotPlot(CD8T, scale = T, col.min = -1,
+        group.by = "seurat_clusters", col.max = 1, features = select) + 
+  scale_colour_gradient2(low = "#0070b2", mid = "#f3f3f1", high = "#da1735") + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+
+table(CD8T$seurat_clusters,CD8T$group)
+Cellratio <- prop.table(table(CD8T$seurat_clusters,CD8T$group), margin = 2)#计算各组样本不同细胞群比例
+Cellratio
+
+CD8T$celltype <- NA
+CD8T$celltype[which(CD8T$seurat_clusters %in% c("0","2")) ] <- "Teff"
+CD8T$celltype[which(CD8T$seurat_clusters %in% c("5")) ] <- "Tex"
+CD8T$celltype[which(CD8T$seurat_clusters %in% c("4","6")) ] <- "Tproliferating"
+CD8T$celltype[which(CD8T$seurat_clusters %in% c("2")) ] <- "Tm"
+CD8T$celltype[which(CD8T$seurat_clusters %in% c("6")) ] <- "Tnaive"
+
+
+CD8T <- autocluster(CD8T, nfeatures = 2000,
+                    ndim = 30, neigh = 100,
+                    dist = 1, res = 1)
+
+unique(CD8T$seurat_clusters)
+CD8T$celltype <- NA
+CD8T$celltype[which(CD8T$seurat_clusters %in% c("0","2")) ] <- "Teff"
+CD8T$celltype[which(CD8T$seurat_clusters %in% c("5")) ] <- "Tex"
+CD8T$celltype[which(CD8T$seurat_clusters %in% c("4","6")) ] <- "Tproliferating"
+CD8T$celltype[which(CD8T$seurat_clusters %in% c("1","3")) ] <- "Tem"
+
+
+select <- c( "Ccr7","Lef1", ###Naive
+             "Il7r","Gzmk", #Memory
+             "Tcf7", "Slamf6","Cxcr3",   #Progenitor
+             "Pdcd1","Cd101","Entpd1","Cd244a","Ctla4","Tox",#Exhaustion
+             "Ifng","Prf1",#Effector
+             "Mki67"#prolifrating
+             
+)
+
+DotPlot(CD8T, scale = T, col.min = -1,
+        group.by = "celltype", col.max = 1, features = select) + 
+  scale_colour_gradient2(low = "#0070b2", mid = "#f3f3f1", high = "#da1735") + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+Cellratio <- prop.table(table(CD8T$celltype,CD8T$group), margin = 2)#计算各组样本不同细胞群比例
+Cellratio
+
+getwd()
+pdf("marker.pdf",onefile = FALSE,width=8,height=4)
+DotPlot(CD8T, scale = T, col.min = -1,
+        group.by = "celltype", col.max = 1, features = select) + 
+  scale_colour_gradient2(low = "#0070b2", mid = "#f3f3f1", high = "#da1735") + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+dev.off()
+
+
+Cellratio <- prop.table(table(CD8T$celltype,CD8T$group), margin = 2)#计算各组样本不同细胞群比例
+Cellratio
+
+
+Cellratio <- as.data.frame(Cellratio)
+colnames(Cellratio)[1] <- "type"
+colnames(Cellratio)[2] <- "sample_time"
+colnames(Cellratio)[3] <- "ratio"
+pdf("CD8比例.pdf",onefile = FALSE,width=5,height=4)
+
+ggplot(data = Cellratio, aes(x=sample_time, y = ratio, fill = type)) +
+  scale_fill_manual(
+    values = c("Teff" = "#bd2628",
+               "Tem" = "#caeaf0",
+               "Tex" = "#81C3EA",
+               "Tproliferating" = "#F48862"))+
+  
+  geom_bar(stat="identity", color = "black", size = 0.55, width = 0.7,
+           position = "fill")+
+  geom_text(aes(label=ratio),
+            position=position_fill(vjust=0.5))
+
+dev.off()
+
+pdf("dimplot.pdf",onefile = FALSE,width=6,height=4)
+dimplot_new(CD8T,
+            reduction = "umap",
+            pt.size = 0.2, label = T,
+            group.by = c("celltype"))
+dev.off()
+
