@@ -1,0 +1,129 @@
+
+import scanpy as sc
+import anndata as ad
+import os
+import numpy as np
+import sys
+sys.path.append(r"/home/zzh/SpottedPy/SpottedPy-main/spottedPy/")
+
+import spottedpy as sp
+import pandas as pd
+import seaborn as sns
+import matplotlib.pyplot as plt
+import squidpy as sq
+from tqdm import tqdm
+
+#read in anndata visium object
+#data called anndata_one_slide_tutorial.h5ad, and found in GitHub and zenodo link
+path="/data/public/scRNA/Aging/demo_ST/data/GHG/G2006_G3001_Updated_TumorST_withDecon.h5ad"
+anndata_breast=sc.read_h5ad(path)
+anndata_breast
+
+anndata_breast.obs['batch'] = "batch"
+print(anndata_breast.obs.head())
+#It is the values in the .obs columns that we are interested in calculating hotspots from
+TME_labels=['dormant_malignant', 'active_malignant', 'TCD4', 'Epi', 'Strom', 'Myeloid', 'NK', 'CD96_neg_CD8', 'B', 'Mast', 'Plasma', 'CD96_pos_CD8']
+tumour_labels=['CD96_neg_CD8','CD96_pos_CD8']
+
+
+spatial_coordinates = np.random.rand(anndata_breast.n_obs, 2)  # 这里 n_obs 是细胞的数量
+
+# 将空间坐标添加到 obsm
+anndata_breast.obsm['spatial'] = spatial_coordinates
+
+print(anndata_breast.obsm.keys())
+
+from sklearn.preprocessing import MinMaxScaler
+
+# 假设你想要归一化的列名列表
+columns_to_normalize = ['dormant_malignant', 'active_malignant', 'TCD4', 'Epi', 'Strom', 'Myeloid', 'NK', 'CD96_neg_CD8', 'B', 'Mast', 'Plasma', 'CD96_pos_CD8']
+
+# 创建 MinMaxScaler 实例
+scaler = MinMaxScaler()
+
+# 进行归一化
+anndata_breast.obs[columns_to_normalize] = scaler.fit_transform(anndata_breast.obs[columns_to_normalize])
+
+for i in tqdm(TME_labels):
+    anndata_breast=sp.create_hotspots(anndata_breast,column_name=i,neighbours_parameters=10,relative_to_batch=True)
+
+anndata_breast
+print(anndata_breast.obs.head(10))
+print(anndata_breast.obs['CD96_neg_CD8'].unique())
+
+TME_labels_hotspots=TME_labels.copy()
+for i in range(0,len(TME_labels)):
+    TME_labels_hotspots[i]=TME_labels[i]+'_hot'
+
+# 文件目录路径
+data_path = "/data/public/scRNA/Aging/demo_ST/data/GHG/"
+
+# 获取所有 .h5ad 文件
+file_list = [f for f in os.listdir(data_path) if f.endswith(".h5ad")]
+
+# 检查是否找到文件
+if not file_list:
+    print("未找到任何 .h5ad 文件！请检查路径。")
+else:
+    print(f"找到 {len(file_list)} 个文件：{file_list}")
+
+# 定义 TME_labels 和初始设置
+TME_labels = ['dormant_malignant', 'active_malignant', 'TCD4', 'Epi', 'Strom', 'Myeloid', 'NK', 'CD96_neg_CD8', 'B', 'Mast', 'Plasma', 'CD96_pos_CD8']
+tumour_labels = ['CD96_neg_CD8', 'CD96_pos_CD8']
+primary_variables_values = ['CD96_pos_CD8_hot', 'CD96_neg_CD8_hot']
+
+
+for file_name in tqdm(file_list, desc="处理文件"):
+    file_path = os.path.join(data_path, file_name)
+    print(f"正在处理文件：{file_name}")
+    anndata_breast = sc.read_h5ad(file_path)
+    anndata_breast.obs['batch'] = "batch"
+    spatial_coordinates = np.random.rand(anndata_breast.n_obs, 2)  # 随机生成空间坐标
+    anndata_breast.obsm['spatial'] = spatial_coordinates
+    columns_to_normalize = TME_labels
+    scaler = MinMaxScaler()
+    anndata_breast.obs[columns_to_normalize] = scaler.fit_transform(anndata_breast.obs[columns_to_normalize])
+    for label in TME_labels:
+        anndata_breast = sp.create_hotspots(anndata_breast, column_name=label, neighbours_parameters=10, relative_to_batch=True)
+    
+    # 构建 TME_labels_hotspots
+    TME_labels_hotspots = [label + "_hot" for label in TME_labels]
+    TME_labels_hotspots = list(set(TME_labels_hotspots))  # 去重
+    TME_labels_hotspots.append("dormant_malignant_hot")
+    
+    # 计算距离
+    distances = sp.calculateDistances(
+        anndata_breast,
+        primary_variables=primary_variables_values,
+        comparison_variables=TME_labels_hotspots,
+        empty_hotspot_default_to_max_distance=True
+    )
+    
+    # 使用指定的 TME_labels_hotspots 进行绘图
+    comparison_vars = ['dormant_malignant_hot', 'active_malignant_hot']  # 指定绘图变量
+    
+    # 绘制气泡图并保存
+    bubble_plot_output = os.path.join(data_path, f"{os.path.splitext(file_name)[0]}_bubble_plot.pdf")
+    sp.plot_bubble_plot_mean_distances(
+        distances,
+        primary_vars=primary_variables_values,
+        comparison_vars=comparison_vars,
+        fig_size=(5.5, 4.6)
+    )
+    plt.savefig(bubble_plot_output, dpi=300, bbox_inches="tight", format="pdf")  # 保存为 PDF
+    plt.close()  # 关闭绘图以释放内存
+    
+    # 绘制柱状图并保存
+    bar_plot_output = os.path.join(data_path, f"{os.path.splitext(file_name)[0]}_bar_plot.pdf")
+    sp.plot_bar_plot_distance(
+        distances,
+        primary_variables=primary_variables_values,
+        comparison_variables=comparison_vars,
+        fig_size=(3, 3)
+    )
+    plt.savefig(bar_plot_output, dpi=300, bbox_inches="tight", format="pdf")  # 保存为 PDF
+    plt.close()  # 关闭绘图以释放内存
+    
+    print(f"图像已保存为：气泡图 - {bubble_plot_output}, 柱状图 - {bar_plot_output}")
+
+print("所有文件处理完成！")
