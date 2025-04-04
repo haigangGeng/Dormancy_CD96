@@ -1,0 +1,221 @@
+Tumor_ST<-readRDS("/ST/processdata/SpatialTME/TumorST.rds.gz")
+
+M1067TI<-read.csv("/data/public/scRNA/Aging/demo_ST/data/H5ad/hotspot/M1067T-I_Updated_TumorST_withDecon_metadata.csv")
+
+input_dir <- '/data/public/scRNA/Aging/demo_ST/data/H5ad/hotspot/'  # 输入目录
+
+csv_files <- list.files(input_dir, pattern = "\\.csv$", full.names = TRUE)
+
+file_list <- list()
+
+for (csv_file in csv_files) {
+  df <- read.csv(csv_file, fileEncoding = "UTF-8")
+
+  base_name <- strsplit(basename(csv_file), "_")[[1]][1]
+  file_list[[base_name]] <- df
+  cat("已读取文件:", csv_file, "并将其添加到列表中\n")
+}
+
+print(file_list)
+
+for (name in names(file_list)) {
+  cat("Processing:", name, "\n")
+  
+  seurat_obj <- Tumor_ST[[name]]
+  df <- file_list[[name]]
+  if ("X" %in% colnames(df)) {
+    rownames(df) <- df$X  # 将 df$X 列作为行名
+    df <- df[, -which(colnames(df) == "X")]  # 删除 X 列
+  } else {
+    stop("CSV 文件缺少 'X' 列，无法匹配行名")
+  }
+  
+  # 调试：输出 CSV 文件中的行名和 Seurat 对象中的细胞名差异
+  if (!all(rownames(df) %in% colnames(seurat_obj))) {
+    cat("Mismatch in cell names for:", name, "\n")
+    cat("df rownames:", head(rownames(df)), "\n")
+    cat("seurat_obj colnames:", head(colnames(seurat_obj)), "\n")
+    cat("Missing in seurat_obj:", setdiff(rownames(df), colnames(seurat_obj)), "\n")
+    cat("Missing in df:", setdiff(colnames(seurat_obj), rownames(df)), "\n")
+    stop("df 的行名与 Seurat 对象中的细胞名不一致")
+  }
+  
+  # 清理行名：去除空格并转化为统一的小写或大写
+  rownames(df) <- toupper(gsub(" ", "", rownames(df)))  # 去掉空格并转为大写
+  colnames(seurat_obj) <- toupper(gsub(" ", "", colnames(seurat_obj)))  # 去掉空格并转为大写
+  
+  # 确保 df 行数与 Seurat 对象的细胞数相同
+  if (nrow(df) != ncol(seurat_obj)) {
+    stop(paste("df 的行数与 Seurat 对象", name, "的细胞数不匹配"))
+  }
+  
+  # 保留需要的列
+  df <- df[, cols_to_keep_all, drop = FALSE]
+  
+  # 将 df 的数据添加到 Seurat 对象的 metadata 中
+  seurat_obj$metadata <- cbind(seurat_obj$metadata, df)
+  
+  # 更新 Tumor_ST 列表中的 Seurat 对象
+  Tumor_ST[[name]] <- seurat_obj
+  
+  cat("Finished processing:", name, "\n")
+}
+
+
+names(Tumor_ST)
+names(file_list)
+
+
+M1066T_1<-Tumor_ST[[21]]
+M1066T_1_meta<-file_list[[15]] 
+rownames(M1066T_1_meta)<-M1066T_1_meta$X
+M1066T_1_meta<-M1066T_1_meta[,c(13:30)]
+
+
+colnames(M1066T_1@meta.data) 
+colnames(file_list[[15]])
+
+# 检查行名是否与 Seurat 对象中的细胞名一致
+if (!all(rownames(M1066T_1_meta) %in% colnames(M1066T_1))) {
+  stop("M1066T_1_meta 的行名与 Seurat 对象中的细胞名不一致")
+}
+
+# 使用 AddMetaData 函数将 M1066T_1_meta 数据添加到 Seurat 对象的 metadata 中
+M1066T_1 <- AddMetaData(M1066T_1, metadata = M1066T_1_meta)
+
+
+## 创建新的列表示每个分组
+M1066T_1@meta.data$group_dormant_active <- ifelse(
+  M1066T_1@meta.data$G_Local_Hotspot_Classification_Detailed_dormant_malignant == "Hotspot", 
+  "Dormant Malignant",
+  ifelse(
+    M1066T_1@meta.data$G_Local_Hotspot_Classification_Detailed_active_malignant == "Hotspot", 
+    "Active Malignant", 
+    NA
+  )
+)
+
+M1066T_1@meta.data$group_CD96 <- ifelse(
+  M1066T_1@meta.data$G_Local_Hotspot_Classification_Detailed_CD96_neg_CD8 == "Hotspot", 
+  "CD96 Neg CD8 Hotspot", 
+  ifelse(
+    M1066T_1@meta.data$G_Local_Hotspot_Classification_Detailed_CD96_pos_CD8 == "Hotspot", 
+    "CD96 Pos CD8 Hotspot", 
+    NA
+  )
+)
+
+# 确保列已正确添加
+head(M1066T_1@meta.data)  # 检查 group_dormant_active 和 group_CD96 是否存在
+
+# 确保已加载 dplyr 包
+library(dplyr)
+
+## 去除含有 NA 值的行
+# 筛选出 `group_dormant_active` 列不为 NA 的行
+subset_dormant_active <- M1066T_1
+subset_dormant_active@meta.data <- subset_dormant_active@meta.data %>%
+  filter(!is.na(group_dormant_active))
+
+# 或者直接使用 filter() 在 `Seurat` 对象中进行操作
+subset_dormant_active <- subset(M1066T_1, subset = group_dormant_active %in% unique(group_dormant_active[!is.na(group_dormant_active)]))
+
+
+
+# 对 subset_CD96 进行更新，去除 NA 值
+subset_CD96 <- M1066T_1
+subset_CD96@meta.data <- subset_CD96@meta.data %>%
+  filter(!is.na(group_CD96))
+
+# 或者直接使用 subset() 来去除 NA 值
+subset_CD96 <- subset(M1066T_1, subset = group_CD96 %in% unique(group_CD96[!is.na(group_CD96)]))
+
+# # 继续处理去除重叠的部分
+# subset_dormant_active_unique <- subset_dormant_active[!rownames(subset_dormant_active) %in% rownames(subset_CD96), ]
+# subset_CD96_unique <- subset_CD96[!rownames(subset_CD96) %in% rownames(subset_dormant_active), ]
+
+# 绘制两个分组在一个图上 (Dormant vs Active)
+plot_dormant_active <- SpatialDimPlot(subset_dormant_active, 
+                                      group.by = "group_dormant_active", 
+                                      cols = c("Dormant Malignant" = "blue", "Active Malignant" = "red"),
+                                      pt.size.factor = 1.6, 
+                                      alpha = 0.8) + ggtitle("Dormant vs Active Malignant")
+
+# 绘制另两个分组在另一张图上 (CD96 Neg vs CD96 Pos)
+plot_CD96 <- SpatialDimPlot(subset_CD96, 
+                            group.by = "group_CD96", 
+                            cols = c("CD96 Neg CD8 Hotspot" = "green", "CD96 Pos CD8 Hotspot" = "orange"),
+                            pt.size.factor = 1.6, 
+                            alpha = 0.8) + ggtitle("CD96 Neg vs CD96 Pos CD8 Hotspot")
+
+# 使用 patchwork 拼接两张图
+library(patchwork)
+combined_plot <- plot_dormant_active + plot_CD96 + plot_layout(ncol = 2)
+
+# 保存图像为PDF
+ggsave("/work/zzh/all_type_code/GHG/M1066T_1_spatial_combined_hotspots.pdf", combined_plot, width = 15, height = 8)
+
+
+# 创建一个新的列，将 group_dormant_active 和 group_CD96 合并
+M1066T_1@meta.data$combined_hotspot <- NA
+
+# Dormant Malignant 和 Active Malignant 组合
+M1066T_1@meta.data$combined_hotspot[M1066T_1@meta.data$group_dormant_active == "Dormant Malignant"] <- "Dormant Malignant"
+M1066T_1@meta.data$combined_hotspot[M1066T_1@meta.data$group_dormant_active == "Active Malignant"] <- "Active Malignant"
+
+table(M1066T_1@meta.data$combined_hotspot)
+# CD96 Neg CD8 和 CD96 Pos CD8 组合
+M1066T_1@meta.data$combined_hotspot[M1066T_1@meta.data$group_CD96 == "CD96 Neg CD8 Hotspot"] <- "CD96 Neg CD8 Hotspot"
+M1066T_1@meta.data$combined_hotspot[M1066T_1@meta.data$group_CD96 == "CD96 Pos CD8 Hotspot"] <- "CD96 Pos CD8 Hotspot"
+
+# 查看新列是否添加成功
+head(M1066T_1@meta.data$combined_hotspot)
+
+# 去除 combined_hotspot 列中为 NA 的细胞
+M1066T_1_clean <- M1066T_1
+M1066T_1_clean@meta.data <- M1066T_1_clean@meta.data %>%
+  filter(!is.na(combined_hotspot))
+
+# 查看合并后的细胞
+table(M1066T_1_clean@meta.data$combined_hotspot)
+# 清理空间图像数据
+M1066T_1_clean <- subset(M1066T_1, cells = colnames(M1066T_1)[!is.na(M1066T_1@meta.data$combined_hotspot)])
+
+# 绘制包含四个热点的HE图像
+plot_combined_hotspots <- SpatialDimPlot(M1066T_1_clean, 
+                                         group.by = "combined_hotspot", 
+                                         cols = c("Dormant Malignant" = "blue", 
+                                                  "Active Malignant" = "red", 
+                                                  "CD96 Neg CD8 Hotspot" = "#1B9E77", 
+                                                  "CD96 Pos CD8 Hotspot" = "orange"),
+                                         pt.size.factor = 1.6, 
+                                         alpha = 0.8) + 
+  ggtitle("Combined Hotspots: Dormant vs Active, CD96 Neg vs Pos")
+
+M1066T_1@meta.data$combined_hotspot <- NA
+
+# Dormant Malignant 和 Active Malignant 组合
+M1066T_1@meta.data$combined_hotspot[M1066T_1@meta.data$group_dormant_active == "Dormant Malignant"] <- "Dormant Malignant"
+M1066T_1@meta.data$combined_hotspot[M1066T_1@meta.data$group_dormant_active == "Active Malignant"] <- "Active Malignant"
+
+table(M1066T_1@meta.data$combined_hotspot)
+# CD96 Neg CD8 和 CD96 Pos CD8 组合
+M1066T_1@meta.data$combined_hotspot[M1066T_1@meta.data$group_CD96 == "CD96 Neg CD8 Hotspot"] <- "CD96 Neg CD8 Hotspot"
+M1066T_1@meta.data$combined_hotspot[M1066T_1@meta.data$group_CD96 == "CD96 Pos CD8 Hotspot"] <- "CD96 Pos CD8 Hotspot"
+
+M1066T_1_clean <- M1066T_1
+M1066T_1_clean@meta.data <- M1066T_1_clean@meta.data %>%
+  filter(!is.na(combined_hotspot))
+
+table(M1066T_1_clean@meta.data$combined_hotspot)
+M1066T_1_clean <- subset(M1066T_1, cells = colnames(M1066T_1)[!is.na(M1066T_1@meta.data$combined_hotspot)])
+
+plot_combined_hotspots <- SpatialDimPlot(M1066T_1_clean, 
+                                         group.by = "combined_hotspot", 
+                                         cols = c("Dormant Malignant" = "blue", 
+                                                  "Active Malignant" = "red", 
+                                                  "CD96 Neg CD8 Hotspot" = "#1B9E77", 
+                                                  "CD96 Pos CD8 Hotspot" = "orange"),
+                                         pt.size.factor = 1.6, 
+                                         alpha = 0.8) + 
+  ggtitle("Combined Hotspots: Dormant vs Active, CD96 Neg vs Pos")
