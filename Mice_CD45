@@ -206,7 +206,7 @@ datafilt_new$celltype_new[which(datafilt_new$seurat_clusters %in% c("1","3","11"
 datafilt_new$celltype_new[which(datafilt_new$seurat_clusters %in% c("2","10","14")) ] <- "NK"
 datafilt_new$celltype_new[which(datafilt_new$seurat_clusters %in% c("22")) ] <- "Mast"
 datafilt_new$celltype_new[which(datafilt_new$seurat_clusters %in% c("4","16","18")) ] <- "B"
-datafilt_new$celltype_new[which(datafilt_new$seurat_clusters %in% c("5","23")) ] <- "Mono"
+datafilt_new$celltype_new[which(datafilt_new$seurat_clusters %in% c("5","23")) ] <- "Neutrophil"
 #datafilt$celltype[which(datafilt$seurat_clusters %in% c("16")) ] <- "Mast"
 
 
